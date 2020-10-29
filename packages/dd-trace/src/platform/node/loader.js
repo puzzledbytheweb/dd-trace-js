@@ -26,7 +26,21 @@ class Loader {
     this._names = new Set(instrumentations
       .map(instrumentation => filename(instrumentation)))
 
-    hook(instrumentedModules, { internals: true }, this._hookModule.bind(this))
+    hook(instrumentedModules, { internals: true }, this._hookModule.bind(this, false))
+  }
+
+  preload (plugins) {
+    this._preplugins = plugins
+    const instrumentations = Array.from(this._plugins.keys())
+      .reduce((prev, current) => prev.concat(current), [])
+
+    const instrumentedModules = uniq(instrumentations
+      .map(instrumentation => instrumentation.name))
+
+    this._prenames = new Set(instrumentations
+      .map(instrumentation => filename(instrumentation)))
+
+    hook(instrumentedModules, { internals: true }, this._hookModule.bind(this, true))
   }
 
   load (instrumentation, config) {
@@ -69,10 +83,10 @@ class Loader {
     return modules
   }
 
-  _hookModule (moduleExports, moduleName, moduleBaseDir) {
+  _hookModule (isPreload, moduleExports, moduleName, moduleBaseDir) {
     moduleName = moduleName.replace(pathSepExpr, '/')
 
-    if (!this._names.has(moduleName)) {
+    if (!(isPreload ? this._prenames : this._names).has(moduleName)) {
       return moduleExports
     }
 
@@ -82,23 +96,27 @@ class Loader {
 
     const moduleVersion = getVersion(moduleBaseDir)
 
-    Array.from(this._plugins.keys())
+    const plugins = isPreload ? this._preplugins : this._plugins
+
+    Array.from(plugins.keys())
       .filter(plugin => [].concat(plugin).some(instrumentation =>
         filename(instrumentation) === moduleName && matchVersion(moduleVersion, instrumentation.versions)
       ))
-      .forEach(plugin => this._validate(plugin, moduleName, moduleBaseDir, moduleVersion))
+      .forEach(plugin => this._validate(plugins, plugin, moduleName, moduleBaseDir, moduleVersion))
 
-    this._plugins
+    plugins
       .forEach((meta, plugin) => {
         try {
           [].concat(plugin)
             .filter(instrumentation => moduleName === filename(instrumentation))
             .filter(instrumentation => matchVersion(moduleVersion, instrumentation.versions))
             .forEach(instrumentation => {
-              const config = this._plugins.get(plugin).config
+              const config = plugins.get(plugin).config
 
-              if (config.enabled !== false) {
+              if (isPreload) {
                 moduleExports = this._instrumenter.patch(instrumentation, moduleExports, config) || moduleExports
+              } else if (this._instrumenter.prepatch) {
+                moduleExports = this._instrumenter.prepatch(instrumentation, moduleExports) || moduleExports
               }
             })
         } catch (e) {
@@ -111,8 +129,8 @@ class Loader {
     return moduleExports
   }
 
-  _validate (plugin, moduleName, moduleBaseDir, moduleVersion) {
-    const meta = this._plugins.get(plugin)
+  _validate (plugins, plugin, moduleName, moduleBaseDir, moduleVersion) {
+    const meta = plugins.get(plugin)
     const instrumentations = [].concat(plugin)
 
     for (let i = 0; i < instrumentations.length; i++) {

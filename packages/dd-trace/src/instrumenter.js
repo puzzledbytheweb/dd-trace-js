@@ -43,6 +43,17 @@ function getConfig (name, config = {}) {
   return config
 }
 
+function getPrepatchWrappedFunction (fn) {
+  const prepatchWrapped = function prepatchWrapped () {
+    // TODO support constructors
+    return (prepatchWrapped._datadog_wrapped || fn).call(this, arguments)
+  }
+
+  // This will be an _actually_ wrapped function once this goes through Instrumenter#wrap
+  prepatchWrapped._datadog_wrapped = fn
+  return prepatchWrapped
+}
+
 class Instrumenter {
   constructor (tracer) {
     this._tracer = tracer
@@ -52,6 +63,7 @@ class Instrumenter {
     this._plugins = new Map()
     this._instrumented = new Map()
     this._disabledPlugins = collectDisabledPlugins()
+    this.preload()
   }
 
   use (name, config) {
@@ -113,6 +125,11 @@ class Instrumenter {
           configurable: true
         })
 
+        if (Object.hasOwnProperty(nodule[name], '_datadog_wrapped')) {
+          nodule[name]._datadog_wrapped = wrapper(nodule[name]._datadog_wrapped)
+          return
+        }
+
         shimmer.wrap.call(this, nodule, name, function (original, name) {
           const wrapped = wrapper(original, name)
           const props = Object.getOwnPropertyDescriptors(original)
@@ -137,6 +154,7 @@ class Instrumenter {
 
     nodules.forEach(nodule => {
       names.forEach(name => {
+        nodule[name] && delete nodule[name]._datadog_wrapped
         shimmer.unwrap.call(this, nodule, name, wrapper)
         nodule[name] && delete nodule[name]._datadog_patched
       })
@@ -203,6 +221,36 @@ class Instrumenter {
       this._plugins.delete(plugin)
 
       platform.metrics().boolean(`datadog.tracer.node.plugin.enabled.by.name`, false, `name:${meta.name}`)
+    }
+  }
+
+  preload () {
+    if (!this._loader.preload) {
+      return
+    }
+    const pluginsMap = new Map()
+    Object.keys(plugins)
+      .filter(name => !this._plugins.has(plugins[name]))
+      .forEach(name => {
+        pluginsMap.set(plugins[name], { name, config: getConfig(name) })
+      })
+    this._loader.preload(pluginsMap)
+  }
+
+  prepatch (instrumentation, moduleExports) {
+    if (!instrumentation.prepatch) {
+      return
+    }
+    const patches = [].concat(instrumentation.prepatch(moduleExports))
+    for (const { obj, methods } of patches) {
+      for (const name of methods) {
+        this.wrap(obj, name, getPrepatchWrappedFunction)
+        // While we're re-using wrap here for simplicity, we don't want to have
+        // the other code here assume that it has been pached in the sense that
+        // the _plugin's_ `patch` function has been called. We'ere adding a
+        // `_datadog_wrapped` property instead.
+        delete obj[name]._datadog_patched
+      }
     }
   }
 
